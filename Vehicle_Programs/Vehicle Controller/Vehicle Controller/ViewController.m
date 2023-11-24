@@ -9,7 +9,8 @@
 @import CoreBluetooth;
 #import "ViewController.h"
 
-#define MIN_COMMAND_SEND_PERIOD 0.032 * 4
+#define COMMAND_DELAY_MULT 5
+#define MIN_COMMAND_SEND_PERIOD 0.032 * COMMAND_DELAY_MULT
 
 @interface ViewController ()
 
