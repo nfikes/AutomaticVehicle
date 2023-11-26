@@ -1,4 +1,4 @@
-// Last Update 11/22/23 
+// Last Update 11/25/23 
 //
 // Emergency Automation superimposition on manual motor control.
 // Created by Nathan Fikes for use in controlling motors from various Ultrasound sensors.
@@ -24,9 +24,11 @@ static int UR_cm = 0;
 static int UB_cm = 0;
 
 // Threshold at which the Vehicle will produce certain actions. 5cm past lower bound.
-static int upperDistanceThreshold = 7;  // cm
+static int upperDistanceThreshold = 20;  // cm
 static int lowerDistanceThreshold = 3;  // cm
 int cm = 0;                             // Initialization of cm as a variable
+
+static int distanceThreshold = 20;       // Was not declared earlier to allow for compatability with older code.
 
 static int motor_steering_angle = 0;    // -90 to 90 steering angle
 static int motor_power = 0;             // -100% to 100% motor power
@@ -76,10 +78,14 @@ long motorPowerPWMandDir(int power) {
 
 // Function to handle the steering servo. Takes an angle.
 long motorSteeringHandler(int steering_angle) {
-  if (abs(steering_angle) >= steer_max) {
-    Serial.print("Error in motor steering, past motor max.");
+  steering_servo.write(constrain(steering_angle, -90, 90) + 90);
+}
+
+float ultrasoundFixer(float ultrasoundSig) {
+  if (ultrasoundSig < 3.00){
+    return 100.0;
   } else {
-    steering_servo.write(steering_angle + 90);
+    return ultrasoundSig;
   }
 }
 
@@ -129,22 +135,23 @@ void loop() {
   float UR_cm = 0.01723 * readUltrasonicDistance(6, 7);
   float UB_cm = 0.01723 * readUltrasonicDistance(8, 12);
 
+  UF_cm = ultrasoundFixer(UF_cm);
+  UL_cm = ultrasoundFixer(UL_cm);
+  UR_cm = ultrasoundFixer(UR_cm);
+  UB_cm = ultrasoundFixer(UB_cm);
+
   static int loop_counter;
   if (loop_counter++ % SERIAL_REFRESH == 0) {
-    //Serial.print("\u0001");  // Control character for the ESPN32-S2 board to refresh the screen.
-    /*
-    Serial.print("\nUltraSound Sample Rate: ");
-    Serial.print(sample_rate);
-    Serial.print("\n[F], ");
+    Serial.print("\u0001");  // Control character for the ESPN32-S2 board to refresh the screen.
     Serial.print(UF_cm);
-    Serial.print("\n[L], ");
+    Serial.print("\n");
     Serial.print(UL_cm);
-    Serial.print("\n[R], ");
+    Serial.print("\n");
     Serial.print(UR_cm);
-    Serial.print("\n[B], ");
+    Serial.print("\n");
     Serial.print(UB_cm);
-    Serial.print("\n\n");
-    */
+    Serial.print("\n");
+    
   }
 
   // We can read serial commands and interpret them to do certain tasks. In this case we will just consider motor functions. The lights will be handeled by the BLE server module. ESP32-WROVER-E.
@@ -174,6 +181,7 @@ void loop() {
             // Nothing in here.
           }
       }
+
       buffer = "";              // clear buffer after reading the value and using it.
     } else {
       
@@ -199,7 +207,135 @@ void loop() {
   //                                                                                      \|_________| |\__\
   //                                                                                                   \|__|
 
+  static float reaction_power = 100;
 
+  if (abs(motor_power) > 10){
+    // If we are driving, we can't assume any value for motor_power, be careful when assigning values to the motor functions.
+
+    if (UF_cm < distanceThreshold){
+      // We can't set this to 0, what should motor power be if there is something in front that is slower?
+      // Protip: scale motor power based on UF_cm reading.
+      //Assuming motor power is postiive (moving forward), things should start happening within that 7cm. Front Ultrasonic is detecting something front.
+      //float reaction_power = motor_power / 5;
+      //Scaling down how strong influence is based on how fast we're going.
+
+      float influence = (-UF_cm * ((reaction_power)/(distanceThreshold-3)) + ((reaction_power)/(distanceThreshold-3)) - 3 + reaction_power );
+      //Crude version of Nathan's desmos formula. When UF_cm = 3, influence value will be 0. When UF_cm = 7, influence value will be in this case, 20.
+      motorPowerPWMandDir(motor_power - influence);
+      //What this is doing is if the UF is reading 7, the infuence value will be 0, therefore 0 changes to MP. 
+      //Could possible wrap influence as a function for other if statements.
+
+      //Superimposing motor_reaction on top of motor_power, we want to have a high value for a lower reading. 1/7 = smaller value than 1/3.
+      //Scale the UF_cm reading to better influence the motor_power. 
+
+
+    } else if (UB_cm < distanceThreshold){
+      // We shouldn't accelerate crazy, what should motor power be if there is something behind moving faster?
+      // Protip: scale motor power based on BF_cm reading.
+      //float reaction_power = motor_power / 5;
+      //This float can be defined as a global later.
+
+
+      float influence = (-UB_cm * ((reaction_power)/(distanceThreshold-3)) + ((reaction_power)/(distanceThreshold-3)) - 3 + reaction_power );
+      motorPowerPWMandDir(motor_power + influence);      
+      //If car reads something from BEHIND, then you want to add influence instead of subtracting.
+      
+    } else if (UB_cm < distanceThreshold && UF_cm < distanceThreshold){
+      // Uh oh, we are in a traffic jam. We don't want to speed up or slow down. In this case we want to maximize space.
+      // Protip: We should speed up if UF_cm < UB_cm or slow down if UF_cm > UB_cm. Scale these on U measurements.
+      //Different between UB and UF sensors. Take the difference between the two sensors, if one of higher, then that sensor has to infleunce the motor more.
+      //float reaction_power = motor_power / 5;
+      float influence = (-(UB_cm - UF_cm ) * ((reaction_power)/(distanceThreshold-3)) + ((reaction_power)/(distanceThreshold-3)) - 3 + reaction_power );
+      motorPowerPWMandDir(motor_power + influence);       
+
+
+    } else if (UL_cm < distanceThreshold){
+      // Someone is too close to the left, which way should we turn?
+      // Protip: set motorSteeringHandler() to a specific steering angle. Negative for left, positive for right.
+      //Imagine a jackknife, if something approaches 
+      //float reaction_power = motor_power / 5;
+      float influence = (-UL_cm * ((reaction_power)/(distanceThreshold-3)) + ((reaction_power)/(distanceThreshold-3)) - 3 + reaction_power );
+
+      motorSteeringHandler(motor_steering_angle + influence);
+
+    } else if (UR_cm < distanceThreshold){
+      // Man now someone is on the right side, which way should we turn?
+      // Protip: set motorSteeringHandler() to a specific steering angle. Negative for left, positive for right.
+      //float reaction_power = motor_power / 5;
+      float influence = (-UR_cm * ((reaction_power)/(distanceThreshold-3)) + ((reaction_power)/(distanceThreshold-3)) - 3 + reaction_power );
+
+      motorSteeringHandler(motor_steering_angle - influence);
+
+    } else if (UL_cm < distanceThreshold && UR_cm < distanceThreshold){
+      // This is quite the pickle, we have two people on either side.
+      // Minimizing space would not be good due to sensitivity. If this occurs we should just drive straight.
+      motorSteeringHandler(motor_steering_angle);
+      // Is this just enough or would slowing down also be a needed measure?
+
+    }
+  } else if (abs(motor_power) < 10){
+    // If we are NOT driving, we are safe to assume motor_power is currently at 0
+
+    if (UF_cm < distanceThreshold){
+      // In this case someone is approaching from the front while we are stationary, where should we drive?
+      // Protip: scale motor power based on UF_cm reading.
+      //float reaction_power = motor_power / 5;
+      float influence = (-UF_cm * ((reaction_power)/(distanceThreshold-3)) + ((reaction_power)/(distanceThreshold-3)) - 3 + reaction_power );
+      motorPowerPWMandDir(motor_power - influence);  
+      
+
+    } else if (UB_cm < distanceThreshold){
+      // Now someone is approaching the back, which direction should we drive?
+      // Protip: scale motor power based on BF_cm reading.
+      //float reaction_power = motor_power / 5;
+      float influence = (-UB_cm * ((reaction_power)/(distanceThreshold-3)) + ((reaction_power)/(distanceThreshold-3)) - 3 + reaction_power );
+      motorPowerPWMandDir(motor_power + influence);  
+
+
+    } else if (UB_cm < distanceThreshold && UF_cm < distanceThreshold){
+      // This is a real traffic jam where everyone is stopped. We should be careful where we drive.
+      // Protip: We should speed up if UF_cm < UB_cm or slow down if UF_cm > UB_cm. Scale these on U measurements.
+      //float reaction_power = motor_power / 5;
+      float influence = (-UB_cm * ((reaction_power)/(distanceThreshold-3)) + ((reaction_power)/(distanceThreshold-3)) - 3 + reaction_power );
+      float influence2 = (-UF_cm * ((reaction_power)/(distanceThreshold-3)) + ((reaction_power)/(distanceThreshold-3)) - 3 + reaction_power );
+      motorPowerPWMandDir(motor_power + (influence2 - influence));  
+
+
+
+    } else if (UL_cm < distanceThreshold){
+      // Someone is too close to the left, which way should we turn? Also which direction do we drive to make space?
+      // Protip: This requires a special maneuver called a Jack-Knife generally used by Semi Trucks. The same concept applies here.
+      // Protip on Jack-Knife: To perform a Jack-Knife, turn toward the incoming obstacle, drive backwards.
+      //float reaction_power = motor_power / 5;
+      float influence = (-UL_cm * ((reaction_power)/(distanceThreshold-3)) + ((reaction_power)/(distanceThreshold-3)) - 3 + reaction_power );
+
+      motorPowerPWMandDir(motor_power - influence);  
+      motorSteeringHandler(motor_steering_angle - influence);
+
+    } else if (UR_cm < distanceThreshold){
+      // Someone is too close to the right now, which way should we turn? Also which direction do we drive to make space?
+      // Protip: This requires a special maneuver called a Jack-Knife generally used by Semi Trucks. The same concept applies here.
+      // Protip on Jack-Knife: To perform a Jack-Knife, turn toward the incoming obstacle, drive backwards.
+      //float reaction_power = motor_power / 5;
+      float influence = (-UR_cm * ((reaction_power)/(distanceThreshold-3)) + ((reaction_power)/(distanceThreshold-3)) - 3 + reaction_power );
+
+      motorPowerPWMandDir(motor_power - influence);  
+      motorSteeringHandler(motor_steering_angle + influence);
+
+
+    } else if (UL_cm < distanceThreshold && UR_cm < distanceThreshold){
+      // This is quite the pickle, we have two people on either side.
+      // Minimizing space would not be good due to sensitivity. If this occurs we should just brake [not move at all].
+      motorPowerPWMandDir(0);
+      //Would superimposing matter due to the fact we want this to be a sudden brake? Or would we want a deceleration to be put into place?
+    }
+  } else {
+    // If no emergency protocols are activated, we can just default the driving parameters into the motor functions.
+    motorPowerPWMandDir(motor_power);
+    //Be very careful with the inputs, whatever changes to input must consider the existing input. Try to superimpose reactions that ALTER.
+    //motorPowerPW is going to override motor_power and motor_direction.
+    motorSteeringHandler(motor_steering_angle);
+  }
 
   // Protocols for each emercency case [What should the car do when something is too close?]:
 
